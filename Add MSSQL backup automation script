@@ -1,0 +1,38 @@
+cat /usr/local/bin/sql_backup.sh
+#!/bin/bash
+
+# Configuration
+BACKUP_DIR="/prod/backup"
+DB_NAME="PRODDB"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+BACKUP_FILE="$BACKUP_DIR/${DB_NAME}_$TIMESTAMP.bak"
+SA_PASSWORD='Backup#2025'
+EMAIL="kedarbhingarde@gmail.com"
+
+# 1. Execute SQL Backup
+echo "Starting backup for $DB_NAME..."
+/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$SA_PASSWORD" -Q "BACKUP DATABASE [$DB_NAME] TO DISK = '$BACKUP_FILE' WITH STATS = 10"
+
+# Check if sqlcmd succeeded
+if [ $? -eq 0 ]; then
+    # 2. Compress the backup
+    gzip "$BACKUP_FILE"
+    FINAL_FILE="${BACKUP_FILE}.gz"
+
+    # 3. Send Success Email (using -r to set a valid From address)
+    echo "Backup for $DB_NAME completed successfully. File: $FINAL_FILE" | mail -s "SUCCESS: SQL Backup - $DB_NAME" -r "$EMAIL" "$EMAIL"
+
+    # 4. Cleanup (Delete files older than 7 days)
+    find "$BACKUP_DIR" -type f -name "*.bak.gz" -mtime +7 -delete
+else
+    # 5. Send Failure Email
+    echo "SQL Backup for $DB_NAME failed at $(date)" | mail -s "FAILURE: SQL Backup - $DB_NAME" -r "$EMAIL" "$EMAIL"
+    exit 1
+fi
+
+
+====================
+crontab -l
+====================
+00 01 * * * /usr/local/bin/sql_backup.sh >> /var/log/sql_backup_cron.log 2>&1
+0 2 * * * find /dess/mssql_logs/ -name "*.sqlaudit" -type f -mtime +7 -delete
