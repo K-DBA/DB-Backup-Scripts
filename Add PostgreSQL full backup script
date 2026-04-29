@@ -1,0 +1,82 @@
+cat /pgbackup/scripts/pg_full_backup.sh
+#!/bin/bash
+
+# ==========================================
+# PostgreSQL Full Backup & Email Script
+# ==========================================
+
+# 1. Configuration Variables
+PG_BACKUP_DIR="/pgbackup/base"
+TIMESTAMP=$(date +"%d_%m_%Y_%H_%M_%S")
+TEMP_DIR="${PG_BACKUP_DIR}/temp_${TIMESTAMP}"
+ZIP_FILE="${PG_BACKUP_DIR}/backup_${TIMESTAMP}.zip"
+
+# Zip Password
+ZIP_PASSWORD="Backup@123#$%"
+
+# Email Configuration
+EMAIL_TO="kedarbhingarde@gmail.com"
+EMAIL_SUBJECT="[PostgreSQL Backup] Report for ${TIMESTAMP}"
+HOSTNAME=$(hostname)
+
+# Point to the correct pgpass location
+export PGPASSFILE='/var/lib/postgresql/17/.pgpass'
+
+# 2. Start Backup Process
+echo "Starting PostgreSQL full backup..."
+
+# Create a temporary directory for the backup
+mkdir -p "${TEMP_DIR}"
+
+# Run pg_basebackup (native tar output)
+# -X stream ensures WAL files are included in the backup
+/usr/lib/postgresql/17/bin/pg_basebackup -U postgres -Ft -z -X stream -D "${TEMP_DIR}"
+
+# 3. Check if backup was successful
+if [ $? -ne 0 ]; then
+    EMAIL_BODY="❌ Backup FAILED on server ${HOSTNAME} at ${TIMESTAMP}. Please check the logs immediately."
+    echo "${EMAIL_BODY}" | mutt -n -e 'set copy=no' -s "${EMAIL_SUBJECT} - FAILED" "${EMAIL_TO}"
+    # Clean up failed temp directory
+    rm -rf "${TEMP_DIR}"
+    exit 1
+fi
+
+# 4. Password protect the tar files
+echo "Encrypting and password protecting the backup..."
+# We use * to zip ALL files created by pg_basebackup (base.tar.gz, pg_wal.tar.gz, etc.)
+zip -j -P "${ZIP_PASSWORD}" "${ZIP_FILE}" "${TEMP_DIR}"/*
+
+# 5. Check if zipping was successful
+if [ $? -eq 0 ]; then
+    # SUCCESS: Delete the temp directory containing the raw tar.gz files
+    rm -rf "${TEMP_DIR}"
+
+    # Calculate final file size
+    FILE_SIZE=$(du -sh "${ZIP_FILE}" | cut -f1)
+
+    EMAIL_BODY="✅ PostgreSQL Full Backup SUCCESSFUL on server ${HOSTNAME}.
+
+Backup Details:
+---------------------------------
+Timestamp : ${TIMESTAMP}
+File Name : ${ZIP_FILE}
+File Size : ${FILE_SIZE}
+Format    : .tar.gz wrapped inside a password-protected .zip
+---------------------------------
+To restore, you must first unzip with the password, then extract the tar.gz."
+else
+    EMAIL_BODY="⚠️ Backup completed, but ZIPPING FAILED on server ${HOSTNAME}. The uncompressed backup is located at ${TEMP_DIR}."
+fi
+
+# 6. Send Email Notification
+echo "${EMAIL_BODY}" | mutt -n -e 'set copy=no' -s "${EMAIL_SUBJECT}" "${EMAIL_TO}"
+
+echo "Backup process completed."
+
+==============================
+crontab -l
+==============================
+0 1 * * * /pgbackup/scripts/pg_full_backup.sh >> /pgbackup/backup_log.txt 2>&1 && /pgbackup/scripts/mv_backup_to_nas.sh
+0 2 * * * find /pgbackup/ -name "backup_log.txt" -type f -mtime +10 -delete
+0 2 * * * find /pgbackup/base/ -name "*.zip" -type f -mtime +10 -delete
+
