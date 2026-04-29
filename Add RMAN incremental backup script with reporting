@@ -1,0 +1,155 @@
+#!/bin/bash
+# Oracle RMAN backup with HTML report and per-run archive
+
+# ---- Oracle environment ----
+export ORACLE_SID=PROD                      # <--- change if needed
+export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+export PATH=$ORACLE_HOME/bin:$PATH
+
+# ---- Paths ----
+BACKUP_ROOT="/oracle/backup"                  # <--- your destination
+TIMESTAMP="$(date +'%d_%m_%Y_%H%M_%S')"      # matches your MySQL style
+RUN_DIR="$BACKUP_ROOT/$TIMESTAMP"
+LOG_FILE="$BACKUP_ROOT/backup_logs_${TIMESTAMP}.txt"
+RMAN_LOG="$RUN_DIR/rman_${TIMESTAMP}.log"
+HTML_REPORT="$RUN_DIR/backup_report.html"
+ARCHIVE_NAME="$BACKUP_ROOT/oracle_bkp_${TIMESTAMP}.tar.gz"
+ZIP_PASSWORD="Backup@123#$%"               # <--- set your zip password here
+
+# Email recipients (optional)
+EMAILS=("kedar.bhingarde@gmail.com" "@gmail.com" "@gmail.com")
+# EMAILS=("@gmail.com")
+
+mkdir -p "$RUN_DIR"
+
+# ---- Collect system info ----
+IP=$(hostname -I | awk '{print $1}')
+DB_NAME="$ORACLE_SID"
+DISK_BEFORE=$(df -h "$BACKUP_ROOT" | awk 'NR==2 {print $4}')
+START_EPOCH=$(date +%s)
+
+# ---- Log: start ----
+echo "RMAN backup started at $(date +'%d-%m-%Y %H:%M:%S')" >> "$LOG_FILE"
+
+# ---- RMAN backup ----
+#rman target / <<EOF > "$RMAN_LOG" 2>&1
+#RUN {
+#  ALLOCATE CHANNEL c1 DEVICE TYPE DISK;
+#  BACKUP AS COMPRESSED BACKUPSET INCREMENTAL LEVEL 0 DATABASE
+#    FORMAT "$RUN_DIR/incr0_%d_%T_%U.bkp";
+#  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
+#    FORMAT "$RUN_DIR/ctrl_%d_%T_%U.bkp";
+#  BACKUP AS COMPRESSED BACKUPSET SPFILE
+#    FORMAT "$RUN_DIR/spfile_%d_%T_%U.bkp";
+#  BACKUP AS COMPRESSED BACKUPSET ARCHIVELOG ALL NOT BACKED UP 1 TIMES
+#    FORMAT "$RUN_DIR/arch_%d_%T_%U.bkp" DELETE NOPROMPT INPUT;
+#  RELEASE CHANNEL c1;
+#}
+#EXIT;
+#EOF
+
+rman target / <<EOF > "$RMAN_LOG" 2>&1
+RUN {
+  ALLOCATE CHANNEL c1 DEVICE TYPE DISK;
+  BACKUP AS COMPRESSED BACKUPSET INCREMENTAL LEVEL 0 DATABASE
+    FORMAT "$RUN_DIR/incr0_%d_%T_%U.bkp";
+  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
+    FORMAT "$RUN_DIR/ctrl_%d_%T_%U.bkp";
+  BACKUP AS COMPRESSED BACKUPSET SPFILE
+    FORMAT "$RUN_DIR/spfile_%d_%T_%U.bkp";
+  BACKUP AS COMPRESSED BACKUPSET ARCHIVELOG ALL NOT BACKED UP 1 TIMES
+    FORMAT "$RUN_DIR/arch_%d_%T_%U.bkp" DELETE INPUT;
+  RELEASE CHANNEL c1;
+}
+EXIT;
+EOF
+
+# ---- Determine status ----
+STATUS="SUCCESS"
+if grep -q "RMAN-00569: =============== ERROR MESSAGE STACK FOLLOWS ==============" "$RMAN_LOG"; then
+  STATUS="FAILED"
+fi
+
+END_EPOCH=$(date +%s)
+DURATION=$((END_EPOCH - START_EPOCH))
+DURATION_FMT=$(printf '%02dh:%02dm:%02ds' $((DURATION/3600)) $((DURATION%3600/60)) $((DURATION%60)))
+DISK_AFTER=$(df -h "$BACKUP_ROOT" | awk 'NR==2 {print $4}')
+
+# ---- Latest L0 backup file info ----
+LATEST_FILE=$(ls -1t "$RUN_DIR"/incr0_*.bkp 2>/dev/null | head -n 1)
+if [ -n "$LATEST_FILE" ]; then
+  SIZE=$(du -h "$LATEST_FILE" | cut -f1)
+  MODIFIED_TIME=$(stat -c '%y' "$LATEST_FILE" | cut -d'.' -f1)
+  BACKUP_INFO_ROW="<tr style='text-align:center;'><td>$MODIFIED_TIME</td><td>Incremental Level 0</td><td>$SIZE</td><td>$(basename $LATEST_FILE)</td></tr>"
+else
+  BACKUP_INFO_ROW="<tr><td colspan='4' style='text-align:center;'>No Incremental Level 0 backup file found</td></tr>"
+fi
+
+# ---- Error tail (if any) ----
+if [ "$STATUS" = "FAILED" ]; then
+  ERROR_MSG=$(grep -E "RMAN-|ORA-" "$RMAN_LOG" | tail -n 20)
+else
+  ERROR_MSG="None"
+fi
+
+# ---- Generate HTML report ----
+cat > "$HTML_REPORT" <<HTML
+<html>
+  <body style="font-family: Arial, sans-serif;">
+    <h2 style="text-align:center;">RMAN Backup Report</h2>
+
+    <table border="1" cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse;">
+      <tr><th style="text-align:center; background-color:#f2f2f2;">IP Address</th><td>$IP</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Database</th><td>$DB_NAME</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Status</th><td>$STATUS</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Start Time</th><td>$(date -d @$START_EPOCH '+%Y-%m-%d %H:%M:%S')</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">End Time</th><td>$(date -d @$END_EPOCH '+%Y-%m-%d %H:%M:%S')</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Duration</th><td>$DURATION_FMT</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Disk Space Before</th><td>$DISK_BEFORE</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Disk Space After</th><td>$DISK_AFTER</td></tr>
+      <tr><th style="text-align:center; background-color:#f2f2f2;">Archive Path</th><td>$ARCHIVE_NAME</td></tr>
+    </table>
+    <br/>
+
+    <h3 style="text-align:center;">Latest Incremental Level 0 Backup File</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse;">
+      <tr style="background-color:#d9edf7; font-weight:bold; text-align:center;">
+        <td>Last Modified</td><td>Backup Type</td><td>Backup Size</td><td>Backup File</td>
+      </tr>
+      $BACKUP_INFO_ROW
+    </table>
+    <br/>
+
+    <h3 style="text-align:center;">Error Messages (if any)</h3>
+    <pre style="border:1px solid #ccc; padding:10px;">$ERROR_MSG</pre>
+
+    <p style="text-align:center;">
+      <b>Note:</b> .
+    </p>
+  </body>
+</html>
+HTML
+
+# ---- Create password-protected zip archive ----
+cd "$RUN_DIR"
+zip -r -P "$ZIP_PASSWORD" "$ARCHIVE_NAME" . >/dev/null
+cd - >/dev/null
+
+# ---- Email HTML report (optional) ----
+if command -v /bin/s-nail >/dev/null 2>&1; then
+  /bin/s-nail -s "RMAN Backup Report - $DB_NAME" -M "text/html" "${EMAILS[@]}" < "$HTML_REPORT"
+fi
+
+# ---- Delete the uncompressed folder since it's inside the password-protected zip ----
+rm -rf "$RUN_DIR"
+
+# ---- Log: finish ----
+echo "RMAN backup finished at $(date +'%d-%m-%Y %H:%M:%S')" >> "$LOG_FILE"
+echo "Status           : $STATUS" >> "$LOG_FILE"
+echo "Archive created  : $ARCHIVE_NAME (Password Protected)" >> "$LOG_FILE"
+echo "HTML report      : Emailed to recipients" >> "$LOG_FILE"
+echo "*****************" >> "$LOG_FILE"
+
+# Exit non-zero if failed (useful for cron monitoring)
+[ "$STATUS" = "SUCCESS" ] || exit 1
+exit 0
