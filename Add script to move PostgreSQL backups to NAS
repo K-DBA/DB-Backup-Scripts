@@ -1,0 +1,82 @@
+cat /pgbackup/scripts/mv_backup_to_nas.sh
+#!/bin/bash
+
+# ==========================================
+# Variables
+# ==========================================
+NAS_SERVER="//192.168.0.114/DB Backups/Guardian"
+MOUNT_POINT="/mnt/nas_storage"
+CRED_FILE="/root/nas_creds"
+BACKUP_DIR="/pgbackup/base/"
+LOG_FILE="/tmp/mv_backup_to_nas.log"
+
+# Postgres User UID/GID
+POSTGRES_UID=114
+POSTGRES_GID=119
+
+# ==========================================
+# Start Logging
+# ==========================================
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "--------------------------------------------------"
+echo "Script started at: $(date)"
+
+# ==========================================
+# 1. Ensure Mount Point Exists
+# ==========================================
+mkdir -p "$MOUNT_POINT"
+
+# ==========================================
+# 2. Mount the NAS (CIFS with sudo)
+# ==========================================
+echo "Mounting NAS..."
+sudo mount -t cifs "$NAS_SERVER" "$MOUNT_POINT" -o credentials=$CRED_FILE,vers=3.0,uid=$POSTGRES_UID,gid=$POSTGRES_GID,file_mode=0770,dir_mode=0770
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to mount NAS. Exiting."
+    exit 1
+fi
+echo "NAS mounted successfully."
+
+# ==========================================
+# 3. Find and Move the Latest Backup (Zip)
+# ==========================================
+# Get today's date in the same format as your backup files (DD_MM_YYYY)
+TODAY=$(date +"%d_%m_%Y")
+
+# Count how many files match today's date
+FILE_COUNT=$(ls -1d "${BACKUP_DIR}"*"${TODAY}"* 2>/dev/null | wc -l)
+
+if [ "$FILE_COUNT" -eq 0 ]; then
+    echo "ERROR: No backup found for today ($TODAY) in $BACKUP_DIR. Unmounting and exiting."
+    sudo umount "$MOUNT_POINT"
+    exit 1
+fi
+
+echo "Found $FILE_COUNT file(s) matching today's date ($TODAY)."
+echo "Moving files to NAS..."
+
+# Move ALL files from today to the NAS
+mv "${BACKUP_DIR}"*"${TODAY}"* "$MOUNT_POINT/"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to move backup files. Unmounting and exiting."
+    sudo umount "$MOUNT_POINT"
+    exit 1
+fi
+echo "Backup files moved successfully."
+
+# ==========================================
+# 4. Unmount the NAS
+# ==========================================
+echo "Unmounting NAS..."
+sudo umount "$MOUNT_POINT"
+
+if [ $? -ne 0 ]; then
+    echo "WARNING: Failed to unmount NAS. Please check manually: sudo umount $MOUNT_POINT"
+else
+    echo "NAS unmounted successfully."
+fi
+
+echo "Script completed at: $(date)"
+echo "--------------------------------------------------"
