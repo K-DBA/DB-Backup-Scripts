@@ -1,0 +1,45 @@
+cat /pgdata/scripts/pg_full_backup.sh
+#!/bin/bash
+
+# --- Configuration ---
+BACKUP_DIR="/pgdata/backup"
+EMAIL="kedarbhingarde@gmail.com"
+TIMESTAMP=$(date +"%d_%m_%Y_%H_%M_%S")
+FILE_NAME="pg_dumpall_${TIMESTAMP}.sql.gz"
+FULL_PATH="$BACKUP_DIR/$FILE_NAME"
+LOG_FILE="/pgdata/scripts/backup_log.log"
+RETENTION_DAYS=7
+
+# Ensure log file exists
+touch "$LOG_FILE"
+echo "------------------------------------------------" >> "$LOG_FILE"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup started (User: $(whoami))" >> "$LOG_FILE"
+
+# --- Execution ---
+# We use -U postgres so the 'root' system user can connect to the DB
+pg_dumpall -U postgres | gzip > "$FULL_PATH"
+STATUS=${PIPESTATUS[0]}
+
+# --- Verification & Notification ---
+if [ $STATUS -eq 0 ]; then
+    SIZE=$(du -sh "$FULL_PATH" | awk '{print $1}')
+    MSG="SUCCESS: Postgres backup completed on $(hostname).\nFile: $FILE_NAME\nSize: $SIZE"
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $MSG" >> "$LOG_FILE"
+    echo -e "$MSG" | mail -s "DB Backup SUCCESS - $(hostname)" "$EMAIL"
+else
+    MSG="FAILURE: Postgres backup failed on $(hostname)"
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $MSG" >> "$LOG_FILE"
+    echo -e "$MSG" | mail -s "DB Backup ALERT - $(hostname)" "$EMAIL"
+    exit 1
+fi
+
+# --- Retention ---
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting cleanup (deleting files older than $RETENTION_DAYS days)" >> "$LOG_FILE"
+find "$BACKUP_DIR" -type f -name "pg_dumpall_*.sql.gz" -mtime +$RETENTION_DAYS -delete
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup process finished" >> "$LOG_FILE"
+
+==================
+crontab -l
+==================
+0 0 * * * /pgdata/scripts/pg_full_backup.sh >> /pgdata/scripts/backup.log 2>&1
